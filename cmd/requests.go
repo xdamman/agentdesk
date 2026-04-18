@@ -267,7 +267,7 @@ func saveAutoApproveRule(a *stripe.IssuingAuthorization) (*rules.Rule, bool, err
 		Agent:    agentName,
 		CardID:   cardID,
 		Merchant: merchant,
-		Amount:   a.Amount,
+		Amount:   resolveAuthAmount(a),
 		Currency: strings.ToLower(string(a.Currency)),
 		Date:     rules.DateFromUnix(a.Created),
 	})

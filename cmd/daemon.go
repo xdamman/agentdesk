@@ -72,6 +72,23 @@ func resolvedPort(cfg *config.Config) int {
 	return 4242
 }
 
+// resolveAuthAmount returns the effective authorization amount. On
+// `issuing_authorization.request` events, Stripe sets the top-level
+// `amount` field to 0 (nothing approved yet) and puts the proposed amount
+// in `pending_request.amount`. Post-decision events (`created` / `updated`)
+// populate the top-level `amount` with the final value. This helper prefers
+// `pending_request.amount` whenever it's non-zero so we always surface the
+// user-visible charge, and fall back to `amount` for closed events.
+func resolveAuthAmount(a *stripe.IssuingAuthorization) int64 {
+	if a == nil {
+		return 0
+	}
+	if a.PendingRequest != nil && a.PendingRequest.Amount > 0 {
+		return a.PendingRequest.Amount
+	}
+	return a.Amount
+}
+
 func init() {
 	rootCmd.AddCommand(daemonCmd)
 	daemonCmd.AddCommand(daemonRegisterCmd)
@@ -507,7 +524,7 @@ func (h *webhookHandler) handleRequest(w http.ResponseWriter, event stripe.Event
 	}
 	merchant := merchantName(&auth)
 	date := rules.DateFromUnix(auth.Created)
-	amount := auth.Amount
+	amount := resolveAuthAmount(&auth)
 
 	rs, err := rules.Load()
 	if err != nil {
