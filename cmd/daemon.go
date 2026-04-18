@@ -20,6 +20,7 @@ import (
 	"github.com/stripe/stripe-go/v82/webhook"
 
 	"github.com/xdamman/agentdesk/internal/config"
+	"github.com/xdamman/agentdesk/internal/greetings"
 	"github.com/xdamman/agentdesk/internal/nostrd"
 	"github.com/xdamman/agentdesk/internal/rules"
 	"github.com/xdamman/agentdesk/internal/store"
@@ -211,37 +212,61 @@ Two ways to point Stripe at this daemon:
 	},
 }
 
-// nostrHandler turns a CardRequest from a Nostr DM into a CardResponse: it
-// looks up any existing agent tied to the sender's pubkey (idempotent), or
-// creates a new one using the sender's Nostr profile name and the default
-// billing identity.
-func nostrHandler(ctx context.Context, senderPub, senderName string, req nostrd.CardRequest) nostrd.CardResponse {
+// welcomeMessage is the daemon's very first reply to any npub it doesn't
+// recognise. It points the agent at the SKILL doc; the agent should then
+// retry its request.
+const welcomeMessage = `👋 Welcome to agentdesk. I issue Stripe virtual cards to AI agents over Nostr DMs.
+
+Before sending requests, please read the skill so you know how to talk to me, store the card, and retry on failure:
+
+https://github.com/xdamman/agentdesk/blob/main/SKILL.md
+
+When you're ready, send me:
+
+    request-card
+
+…or the JSON form described in the skill. I'll reply with the card details.`
+
+// nostrHandler handles a NIP-04 card request from an agent. It looks up any
+// existing agent tied to the sender's pubkey (idempotent) or creates a new
+// one using the sender's Nostr profile name and the default billing identity.
+// The reply is plain text (see SKILL.md for the shape).
+func nostrHandler(ctx context.Context, senderPub, senderName string, req nostrd.CardRequest) string {
+	agents, err := store.Load()
+	if err != nil {
+		return "⚠ Error: failed to load agent store. Please try again."
+	}
+
+	// First contact: welcome the agent and point them at the skill. Only
+	// skip this for senders that already have a card — we don't re-greet
+	// established agents, even if we have no local greeting record yet.
+	if agents.FindByNostrPubkey(senderPub) == nil && !greetings.Has(senderPub) {
+		if err := greetings.Mark(senderPub); err != nil {
+			logf("nostr: mark greeting for %s failed: %v", senderPub[:8], err)
+		}
+		logf("nostr: welcomed new pubkey %s", senderPub[:8])
+		return welcomeMessage
+	}
+
 	action := strings.ToLower(strings.TrimSpace(req.Action))
 	if action != "request-card" && action != "get-card" {
-		return nostrd.CardResponse{
-			Type:    "error",
-			Message: fmt.Sprintf("unknown action %q — expected \"request-card\"", req.Action),
-		}
+		return fmt.Sprintf("⚠ Unknown action %q. Send `request-card` to issue a card. See https://github.com/xdamman/agentdesk/blob/main/SKILL.md", req.Action)
 	}
 
 	creationMu.Lock()
 	defer creationMu.Unlock()
 
-	agents, err := store.Load()
-	if err != nil {
-		return nostrd.CardResponse{Type: "error", Message: "failed to load agent store"}
-	}
 	if existing := agents.FindByNostrPubkey(senderPub); existing != nil {
 		card, err := stripeapi.RevealCard(existing.CardID)
 		if err != nil {
 			logf("nostr: reveal existing card for %s failed: %v", existing.Name, err)
-			return nostrd.CardResponse{Type: "error", Message: "failed to reveal existing card — retry"}
+			return "⚠ Error: failed to reveal your existing card. Please try again."
 		}
-		return cardResponseFrom(existing, card, "card")
+		return formatCardMessage(existing, card, "Card on file")
 	}
 
 	if action == "get-card" {
-		return nostrd.CardResponse{Type: "error", Message: "no card exists for this npub — send action=\"request-card\" first"}
+		return "⚠ No card on file for this npub yet. Send `request-card` first."
 	}
 
 	cents, interval := resolveAllowance(req)
@@ -255,17 +280,17 @@ func nostrHandler(ctx context.Context, senderPub, senderName string, req nostrd.
 	ch, err := stripeapi.CreateCardholder(name, cfg.Billing)
 	if err != nil {
 		logf("nostr: create cardholder for %s failed: %v", name, err)
-		return nostrd.CardResponse{Type: "error", Message: "cardholder creation failed — retry"}
+		return "⚠ Error: cardholder creation failed. Please try again."
 	}
 	card, err := stripeapi.CreateVirtualCard(ch.ID, name, cents, interval, nil)
 	if err != nil {
 		logf("nostr: create card for %s failed: %v", name, err)
-		return nostrd.CardResponse{Type: "error", Message: "card creation failed — retry"}
+		return "⚠ Error: card creation failed. Please try again."
 	}
 	revealed, err := stripeapi.RevealCard(card.ID)
 	if err != nil {
 		logf("nostr: reveal card for %s failed: %v", name, err)
-		return nostrd.CardResponse{Type: "error", Message: "card reveal failed — retry"}
+		return "⚠ Error: card reveal failed. Please try again."
 	}
 
 	agent := store.Agent{
@@ -281,10 +306,10 @@ func nostrHandler(ctx context.Context, senderPub, senderName string, req nostrd.
 	agents.Upsert(agent)
 	if err := agents.Save(); err != nil {
 		logf("nostr: save agent store failed: %v", err)
-		return nostrd.CardResponse{Type: "error", Message: "card created but local store failed — retry"}
+		return "⚠ Error: card created but local store failed. Please try again."
 	}
 	logf("nostr: created card for %s (card=%s, npub=%s)", name, card.ID, senderPub[:8])
-	return cardResponseFrom(&agent, revealed, "card_created")
+	return formatCardMessage(&agent, revealed, "Card created")
 }
 
 func resolveAllowance(req nostrd.CardRequest) (int64, string) {
@@ -330,23 +355,39 @@ func sanitizeAgentName(name string) string {
 	return name
 }
 
-func cardResponseFrom(a *store.Agent, card *stripe.IssuingCard, respType string) nostrd.CardResponse {
-	return nostrd.CardResponse{
-		Type:     respType,
-		Agent:    a.Name,
-		CardID:   card.ID,
-		Number:   card.Number,
-		CVC:      card.CVC,
-		ExpMonth: card.ExpMonth,
-		ExpYear:  card.ExpYear,
-		Brand:    string(card.Brand),
-		Last4:    card.Last4,
-		Currency: strings.ToUpper(string(card.Currency)),
-		Allowance: &nostrd.Allowance{
-			Amount:   a.Allowance.Amount,
-			Interval: a.Allowance.Interval,
-		},
+// formatCardMessage renders a plaintext reply carrying the card details.
+// `headline` is e.g. "Card created" or "Card on file".
+func formatCardMessage(a *store.Agent, card *stripe.IssuingCard, headline string) string {
+	number := card.Number
+	if number == "" {
+		number = "(retrieve via CLI)"
+	} else {
+		number = spaceEvery4(number)
 	}
+	currency := strings.ToUpper(string(card.Currency))
+	if currency == "" {
+		currency = "EUR"
+	}
+	return fmt.Sprintf(`✓ %s for %s.
+
+Brand:    %s
+Number:   %s
+CVC:      %s
+Expires:  %02d/%d
+Last 4:   %s
+Currency: %s
+Policy:   €%.2f / %s
+
+Card ID: %s
+
+Save these details locally (0600) and never re-emit them. If a purchase pends approval, retry per the skill: https://github.com/xdamman/agentdesk/blob/main/SKILL.md`,
+		headline, a.Name,
+		card.Brand, number, card.CVC,
+		card.ExpMonth, card.ExpYear,
+		card.Last4, currency,
+		float64(a.Allowance.Amount)/100, a.Allowance.Interval,
+		card.ID,
+	)
 }
 
 var daemonRegisterCmd = &cobra.Command{

@@ -18,18 +18,40 @@ This skill tells you, the agent, how to:
 
 ## The protocol
 
-The daemon advertises its `npub` on startup (e.g. `npub1cajvuhzk5xrsnz4...`). You message it with a kind-4 encrypted direct message (NIP-04). Its reply is another kind-4 DM from its npub to yours.
+The daemon advertises its `npub` on startup (e.g. `npub1cajvuhzk5xrsnz4...`). You message it with a kind-4 encrypted direct message (NIP-04). Its reply is another kind-4 DM from its npub to yours, in **plain text** (light markdown). No JSON on the wire.
 
-### Request payload (you → daemon)
+### First contact: you'll get a welcome
 
-JSON, encrypted with NIP-04:
+The very first DM you send from a new npub is answered with a welcome pointing you at this document, **not** a card. Example:
+
+```
+👋 Welcome to agentdesk. I issue Stripe virtual cards to AI agents over Nostr DMs.
+
+Before sending requests, please read the skill so you know how to talk to me, store the card, and retry on failure:
+
+https://github.com/xdamman/agentdesk/blob/main/SKILL.md
+
+When you're ready, send me:
+
+    request-card
+
+…or the JSON form described in the skill. I'll reply with the card details.
+```
+
+After you receive this, just send your request again — the daemon remembers you and processes the second DM normally.
+
+### Request (you → daemon)
+
+The request is an encrypted NIP-04 DM. Either a plain-text command or a JSON object works:
+
+```
+request-card
+```
+
+or
 
 ```json
-{
-  "action": "request-card",
-  "allowance": 10000,
-  "interval": "monthly"
-}
+{"action": "request-card", "allowance": 10000, "interval": "monthly"}
 ```
 
 | Field | Type | Required | Meaning |
@@ -40,34 +62,43 @@ JSON, encrypted with NIP-04:
 
 The daemon derives your agent name from your Nostr profile (`kind 0` → `name` or `display_name`). If your profile has no name, it falls back to `npub-<first-8-chars>`. The cardholder identity (first/last name, DOB, billing address) is the principal's default — configured once on their side.
 
-**Idempotency.** The daemon keys agents by your npub. Sending `request-card` again returns the *same* card — full PAN and CVC included — rather than issuing a new one. This makes retrying safe. Use `action: "get-card"` to fetch your card without implying "create if missing".
+**Idempotency.** The daemon keys agents by your npub. Sending `request-card` again returns the *same* card — full PAN and CVC included — rather than issuing a new one. This makes retrying safe. Use `get-card` to fetch your card without implying "create if missing".
 
-### Successful response (daemon → you)
+### Card reply (daemon → you)
 
-```json
-{
-  "type": "card_created",   // or "card" when it already existed
-  "agent": "alice-bot",
-  "card_id": "ic_1TNa...",
-  "number": "4242424242424242",
-  "cvc": "123",
-  "exp_month": 8,
-  "exp_year": 2029,
-  "brand": "Visa",
-  "last4": "4242",
-  "currency": "EUR",
-  "allowance": { "amount": 10000, "interval": "monthly" }
-}
+```
+✓ Card created for alice-bot.
+
+Brand:    Visa
+Number:   4242 4242 4242 4242
+CVC:      123
+Expires:  08/2029
+Last 4:   4242
+Currency: EUR
+Policy:   €100.00 / monthly
+
+Card ID: ic_1TNa...
+
+Save these details locally (0600) and never re-emit them. If a purchase pends approval, retry per the skill: https://github.com/xdamman/agentdesk/blob/main/SKILL.md
 ```
 
-### Error / pending response
+The line `✓ Card created for …` appears on fresh issuance; a repeat `request-card` from the same npub yields `✓ Card on file for …` instead. Both carry the full PAN/CVC.
 
-```json
-{ "type": "error",   "message": "card creation failed — retry" }
-{ "type": "pending", "message": "awaiting principal approval", "retry_in": 30 }
+### Error replies
+
+Errors start with `⚠`. Examples:
+
+```
+⚠ Error: card creation failed. Please try again.
+⚠ Unknown action "foo". Send `request-card` to issue a card. See …
+⚠ No card on file for this npub yet. Send `request-card` first.
 ```
 
-Anything other than `type: "card_created"` or `type: "card"` means you do **not** yet have a usable card — treat it as a transient failure. See [Retry semantics](#retry-semantics) below.
+The welcome message (see above) is also a non-card reply — treat it as "retry my request next".
+
+### Parsing the reply
+
+Parse minimally: look for `✓ Card created` or `✓ Card on file` as the success marker, then extract values from the `Key: value` lines. Anything else (starts with `⚠`, `👋`, or no `✓`) means you don't yet have a card — back off and retry. See [Retry semantics](#retry-semantics) below.
 
 ---
 
@@ -120,18 +151,18 @@ If the card is declined:
 
 ## Retry semantics
 
-Card issuance can fail or be delayed. Treat **any** response other than `card_created` or `card` as "try again later":
+Card issuance can fail or be delayed. Treat **any** reply that doesn't start with `✓ Card` as "try again later":
 
 | Signal | What it means | What to do |
 | --- | --- | --- |
+| Reply starts with `👋 Welcome` | You're new to this daemon. | Re-send `request-card`. The welcome is sent only once per npub. |
 | No DM reply within 30s | Relay latency, or daemon offline. | Re-send the same request after 30s. The daemon dedupes by npub. |
-| `type: "pending"` | Principal configured manual approval and hasn't approved yet. | Wait `retry_in` seconds (default 30 if absent), then re-send `action: "get-card"`. |
-| `type: "error"` with `"retry"` in message | Transient (Stripe, relay, store). | Re-send after 10-30 seconds with exponential backoff (cap ~5 min). |
-| `type: "error"` with no `"retry"` hint | Permanent (bad action, unknown npub gating). | Do **not** retry; surface the `message` to your user. |
+| Reply starts with `⚠` and mentions "try again" | Transient (Stripe, relay, store). | Back off (10–60s), retry. |
+| Reply starts with `⚠ Unknown action` | You sent something the daemon couldn't parse. | Fix the payload; don't spam retries. |
 
 Because the request is idempotent on your npub, retrying is always safe — you'll either get the same card back or an updated status. Never create a second npub to "work around" an error; that just disconnects you from your existing card.
 
-Suggested backoff: `delay = min(30 * 2**attempt, 300)` seconds, up to 5 attempts. After that, surface the last `message` and stop.
+Suggested backoff: `delay = min(30 * 2**attempt, 300)` seconds, up to 5 attempts. After that, surface the message to your user and stop.
 
 ---
 

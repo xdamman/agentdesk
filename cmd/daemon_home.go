@@ -37,6 +37,16 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("saved") == "1" {
 		data.Notice = "Settings saved."
 	}
+
+	// Webhook setup block: compute the daemon's URL as reached by this
+	// request and tell the user what to give Stripe.
+	base := requestBaseURL(r)
+	data.Webhook.URL = base + daemonPath
+	data.Webhook.IsLocal = isLocalHost(r.Host)
+	if cfg, _ := config.LoadOrEmpty(); cfg != nil {
+		data.Webhook.SecretSet = cfg.WebhookSecret != ""
+		data.Webhook.RegisteredURL = cfg.WebhookURL
+	}
 	if daemonIdentity != nil {
 		data.Npub = daemonIdentity.Npub
 		if png, err := qrcode.Encode(daemonIdentity.Npub, qrcode.Medium, 280); err == nil {
@@ -113,6 +123,48 @@ type homeData struct {
 	Requests  []requestRow
 	Now       string
 	Notice    string
+	Webhook   webhookInfo
+}
+
+type webhookInfo struct {
+	URL           string // e.g. http://localhost:4242/webhook
+	IsLocal       bool   // true when Host looks like localhost / an RFC1918 IP
+	SecretSet     bool   // a webhook_secret is already saved in config
+	RegisteredURL string // from config; non-empty once `daemon register` has run
+}
+
+// requestBaseURL reconstructs scheme://host for the incoming request,
+// preferring X-Forwarded-Proto when set by a reverse proxy / tunnel.
+func requestBaseURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if xf := r.Header.Get("X-Forwarded-Proto"); xf != "" {
+		scheme = strings.ToLower(xf)
+	}
+	return scheme + "://" + r.Host
+}
+
+func isLocalHost(host string) bool {
+	h := host
+	if i := strings.LastIndex(h, ":"); i > 0 && !strings.Contains(h[i+1:], ".") {
+		h = h[:i]
+	}
+	h = strings.Trim(h, "[]")
+	switch {
+	case h == "localhost" || strings.HasSuffix(h, ".localhost"):
+		return true
+	case h == "0.0.0.0", h == "::", h == "::1":
+		return true
+	}
+	if strings.HasPrefix(h, "127.") {
+		return true
+	}
+	if strings.HasPrefix(h, "10.") || strings.HasPrefix(h, "192.168.") {
+		return true
+	}
+	return false
 }
 
 type agentRow struct {
@@ -198,6 +250,34 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
       {{else}}
         <p class="empty">Nostr listener is disabled.</p>
       {{end}}
+    </section>
+
+    <section>
+      <h2>Stripe webhook</h2>
+      <p style="margin: 0 0 10px; color: var(--muted);">Your daemon is reachable at this URL for the current request:</p>
+      <code style="display: block; word-break: break-all; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); margin-bottom: 12px;">{{.Webhook.URL}}</code>
+
+      {{if .Webhook.IsLocal}}
+      <p style="margin: 0 0 8px; color: var(--muted);">This is a local URL — Stripe can't reach it directly. Pick one:</p>
+      <p style="margin: 0 0 6px;"><strong>Option A — Stripe CLI (dev):</strong></p>
+      <pre style="background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x: auto; margin: 0 0 12px;">stripe listen --forward-to {{.Webhook.URL}}
+stripe trigger issuing_authorization.request</pre>
+
+      <p style="margin: 0 0 6px;"><strong>Option B — expose publicly</strong> (ngrok / cloudflared / production) <strong>and register:</strong></p>
+      <pre style="background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x: auto; margin: 0;">agentdesk daemon register --url https://your-public-host/webhook</pre>
+      {{else}}
+      <p style="margin: 0 0 6px;">Register this URL with Stripe (saves the signing secret to your config):</p>
+      <pre style="background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x: auto; margin: 0 0 8px;">agentdesk daemon register --url {{.Webhook.URL}}</pre>
+      <p style="margin: 0; color: var(--muted); font-size: 12px;">Or paste it into the Stripe Dashboard → Developers → Webhooks, with events <code class="mono">issuing_authorization.request</code>, <code class="mono">.created</code>, <code class="mono">.updated</code>.</p>
+      {{end}}
+
+      <p style="margin-top: 12px; color: var(--muted); font-size: 12px;">
+        {{if .Webhook.SecretSet}}
+          <span style="color: var(--ok, #7ee0a8);">●</span> Webhook secret stored{{if .Webhook.RegisteredURL}} · registered to <span class="mono">{{.Webhook.RegisteredURL}}</span>{{end}}.
+        {{else}}
+          <span style="color: #ffd785;">●</span> No webhook secret saved yet — the daemon can't verify Stripe signatures. Run <span class="mono">agentdesk daemon register</span> or set <span class="mono">config.webhook_secret</span>.
+        {{end}}
+      </p>
     </section>
 
     <section>

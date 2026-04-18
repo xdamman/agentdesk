@@ -19,7 +19,7 @@ import (
 // dispatchNostrDM is the top-level Listener handler. It routes messages from
 // the admin (approve/decline replies) separately from card requests from
 // agents.
-func dispatchNostrDM(ctx context.Context, senderPub, senderName string, req nostrd.CardRequest) nostrd.CardResponse {
+func dispatchNostrDM(ctx context.Context, senderPub, senderName string, req nostrd.CardRequest) string {
 	cfg, _ := config.LoadOrEmpty()
 	if cfg.AdminNostrPubkey != "" && strings.EqualFold(senderPub, cfg.AdminNostrPubkey) {
 		return handleAdminReply(req.Action)
@@ -28,16 +28,14 @@ func dispatchNostrDM(ctx context.Context, senderPub, senderName string, req nost
 }
 
 // handleAdminReply parses the admin's free-form DM and, if it looks like an
-// approve/decline, pops the oldest pending ask and applies the action.
-func handleAdminReply(text string) nostrd.CardResponse {
+// approve/decline, pops the oldest pending ask and applies the action. The
+// returned string is DM'd back to the admin as a plaintext ack.
+func handleAdminReply(text string) string {
 	text = strings.TrimSpace(text)
 	explicitID := extractAuthID(text)
 	intent := parseIntent(text)
 	if intent == "" {
-		return nostrd.CardResponse{
-			Type:    "ack",
-			Message: "reply \"approve\" or \"decline\" (also: yes/no/ok/👍/👎)",
-		}
+		return "Reply `approve` or `decline` (also: yes/no/ok/👍/👎). Append an `iauth_…` id to target a specific request."
 	}
 
 	var ask *pendingAdminAsk
@@ -49,24 +47,21 @@ func handleAdminReply(text string) nostrd.CardResponse {
 	} else {
 		ask = popOldestAsk()
 		if ask == nil {
-			return nostrd.CardResponse{
-				Type:    "ack",
-				Message: "no pending requests to act on",
-			}
+			return "No pending requests to act on."
 		}
 	}
 
 	if intent == "approve" {
 		if err := doApprove(ask.AuthID); err != nil {
-			return nostrd.CardResponse{Type: "ack", Message: summariseForAdmin(ask, "approve failed: "+err.Error())}
+			return summariseForAdmin(ask, "approve failed: "+err.Error())
 		}
-		return nostrd.CardResponse{Type: "ack", Message: summariseForAdmin(ask, "approved")}
+		return summariseForAdmin(ask, "approved")
 	}
 	// decline
 	if err := doDecline(ask.AuthID); err != nil {
-		return nostrd.CardResponse{Type: "ack", Message: summariseForAdmin(ask, "decline failed: "+err.Error())}
+		return summariseForAdmin(ask, "decline failed: "+err.Error())
 	}
-	return nostrd.CardResponse{Type: "ack", Message: summariseForAdmin(ask, "declined")}
+	return summariseForAdmin(ask, "declined")
 }
 
 // parseIntent inspects text and returns "approve", "decline", or "".

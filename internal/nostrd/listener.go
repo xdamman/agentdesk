@@ -31,39 +31,19 @@ const (
 	publishTimeout = 3 * time.Second
 )
 
-// CardRequest is the NIP-04 payload an agent sends to request a card.
+// CardRequest is the NIP-04 payload an agent sends to request a card. Agents
+// can submit either JSON or a bare plaintext command (e.g. "request-card").
 type CardRequest struct {
-	Action    string `json:"action"`              // "request-card"
+	Action    string `json:"action"`              // "request-card" | "get-card"
 	Allowance int64  `json:"allowance,omitempty"` // EUR, in cents
 	Interval  string `json:"interval,omitempty"`  // daily|weekly|monthly
 }
 
-// CardResponse is the payload the daemon replies with.
-type CardResponse struct {
-	Type      string     `json:"type"` // "card_created" | "card" | "error" | "pending"
-	Agent     string     `json:"agent,omitempty"`
-	CardID    string     `json:"card_id,omitempty"`
-	Number    string     `json:"number,omitempty"`
-	CVC       string     `json:"cvc,omitempty"`
-	ExpMonth  int64      `json:"exp_month,omitempty"`
-	ExpYear   int64      `json:"exp_year,omitempty"`
-	Brand     string     `json:"brand,omitempty"`
-	Last4     string     `json:"last4,omitempty"`
-	Currency  string     `json:"currency,omitempty"`
-	Allowance *Allowance `json:"allowance,omitempty"`
-	Message   string     `json:"message,omitempty"`
-	RetryIn   int        `json:"retry_in,omitempty"` // seconds, for "pending"
-}
-
-type Allowance struct {
-	Amount   int64  `json:"amount"`
-	Interval string `json:"interval"`
-}
-
 // Handler is invoked for every incoming NIP-04 DM addressed to the daemon. It
-// returns a CardResponse that the listener will encrypt and send back. The
-// handler receives the sender's resolved profile name when available.
-type Handler func(ctx context.Context, senderPub, senderName string, req CardRequest) CardResponse
+// returns the plaintext reply to send back (empty string suppresses the
+// reply). The handler receives the sender's resolved profile name when
+// available.
+type Handler func(ctx context.Context, senderPub, senderName string, req CardRequest) string
 
 // Listener is the long-running Nostr subscriber.
 type Listener struct {
@@ -199,21 +179,23 @@ func (l *Listener) handle(ctx context.Context, relay *nostr.Relay, ev *nostr.Eve
 	name := fetchProfileName(ctx, l.Relays, ev.PubKey)
 	l.logf("nostr: DM from %s (%s): action=%q", name, shortPub(ev.PubKey), req.Action)
 
-	resp := l.Handler(ctx, ev.PubKey, name, req)
-	if err := l.sendReply(ctx, ev.PubKey, resp); err != nil {
+	reply := l.Handler(ctx, ev.PubKey, name, req)
+	if reply == "" {
+		return
+	}
+	if err := l.sendReply(ctx, ev.PubKey, reply); err != nil {
 		l.logf("nostr: reply to %s failed: %v", shortPub(ev.PubKey), err)
 		return
 	}
-	l.logf("nostr: replied type=%q", resp.Type)
+	l.logf("nostr: replied (%d bytes)", len(reply))
 }
 
-func (l *Listener) sendReply(ctx context.Context, toPub string, resp CardResponse) error {
-	body, _ := json.Marshal(resp)
+func (l *Listener) sendReply(ctx context.Context, toPub string, body string) error {
 	ss, err := nip04.ComputeSharedSecret(toPub, l.Identity.SecretHex)
 	if err != nil {
 		return err
 	}
-	cipher, err := nip04.Encrypt(string(body), ss)
+	cipher, err := nip04.Encrypt(body, ss)
 	if err != nil {
 		return err
 	}
