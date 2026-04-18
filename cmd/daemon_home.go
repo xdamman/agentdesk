@@ -8,9 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nbd-wtf/go-nostr/nip19"
 	stripe "github.com/stripe/stripe-go/v82"
 
 	"github.com/xdamman/agentdesk/internal/config"
+	"github.com/xdamman/agentdesk/internal/dmlog"
 	"github.com/xdamman/agentdesk/internal/store"
 	"github.com/xdamman/agentdesk/internal/stripeapi"
 
@@ -43,9 +45,38 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 	base := requestBaseURL(r)
 	data.Webhook.URL = base + daemonPath
 	data.Webhook.IsLocal = isLocalHost(r.Host)
-	if cfg, _ := config.LoadOrEmpty(); cfg != nil {
+	cfg, _ := config.LoadOrEmpty()
+	if cfg != nil {
 		data.Webhook.SecretSet = cfg.WebhookSecret != ""
 		data.Webhook.RegisteredURL = cfg.WebhookURL
+	}
+
+	// Admin block: hex + npub + NIP-05 + cached profile name.
+	if cfg != nil && cfg.AdminNostrPubkey != "" {
+		data.Admin.Hex = cfg.AdminNostrPubkey
+		data.Admin.HexShort = cfg.AdminNostrPubkey[:12] + "…"
+		if np, err := nip19.EncodePublicKey(cfg.AdminNostrPubkey); err == nil {
+			data.Admin.Npub = np
+		}
+		data.Admin.NIP05 = cfg.AdminNIP05
+		data.Admin.Name = AdminProfile()
+		RefreshAdminProfile(cfg.AdminNostrPubkey) // kick off a lookup if not cached
+	}
+
+	// DM log — most recent 30 entries.
+	for _, e := range dmlog.Recent(30) {
+		peerNpub := ""
+		if np, err := nip19.EncodePublicKey(e.Peer); err == nil && len(np) > 12 {
+			peerNpub = np[:12] + "…"
+		}
+		data.DMLog = append(data.DMLog, dmLogRow{
+			Time:     e.Time.Format("15:04:05"),
+			Dir:      e.Dir,
+			Peer:     peerNpub,
+			PeerName: e.PeerName,
+			Note:     e.Note,
+			Preview:  e.Preview,
+		})
 	}
 	if daemonIdentity != nil {
 		data.Npub = daemonIdentity.Npub
@@ -121,9 +152,28 @@ type homeData struct {
 	QRDataURL template.URL
 	Agents    []agentRow
 	Requests  []requestRow
+	DMLog     []dmLogRow
+	Admin     adminInfo
 	Now       string
 	Notice    string
 	Webhook   webhookInfo
+}
+
+type adminInfo struct {
+	Hex      string
+	HexShort string
+	Npub     string
+	NIP05    string
+	Name     string
+}
+
+type dmLogRow struct {
+	Time     string
+	Dir      string // "in" | "out"
+	Peer     string // short npub
+	PeerName string
+	Note     string
+	Preview  string
 }
 
 type webhookInfo struct {
@@ -278,6 +328,47 @@ stripe trigger issuing_authorization.request</pre>
           <span style="color: #ffd785;">●</span> No webhook secret saved yet — the daemon can't verify Stripe signatures. Run <span class="mono">agentdesk daemon register</span> or set <span class="mono">config.webhook_secret</span>.
         {{end}}
       </p>
+    </section>
+
+    <section>
+      <h2>Admin approver</h2>
+      {{if .Admin.Hex}}
+      <table>
+        <tbody>
+          <tr><th style="width: 110px; text-align: left;">Profile name</th><td>{{if .Admin.Name}}{{.Admin.Name}}{{else}}<span class="empty">(looking up…)</span>{{end}}</td></tr>
+          <tr><th style="text-align: left;">NIP-05</th><td class="mono">{{if .Admin.NIP05}}{{.Admin.NIP05}}{{else}}—{{end}}</td></tr>
+          <tr><th style="text-align: left;">npub</th><td class="mono" style="word-break: break-all;">{{.Admin.Npub}}</td></tr>
+          <tr><th style="text-align: left;">hex pubkey</th><td class="mono" style="word-break: break-all;">{{.Admin.Hex}}</td></tr>
+        </tbody>
+      </table>
+      <p style="margin-top: 10px; color: var(--muted); font-size: 12px;">DMs about pending authorization requests are sent here. Reply <span class="mono">approve</span> / <span class="mono">decline</span> (also yes/no/ok/👍/👎).</p>
+      {{else}}
+        <p class="empty">No admin configured. Run <span class="mono">agentdesk setup --admin &lt;npub|nip05&gt;</span> or edit via <a href="/setup" style="color: var(--accent);">/setup</a>.</p>
+      {{end}}
+    </section>
+
+    <section>
+      <h2>DM log (in-memory, debug)</h2>
+      {{if .DMLog}}
+      <table>
+        <thead><tr><th>Time</th><th>Dir</th><th>Peer</th><th>Name</th><th>Note</th><th>Preview</th></tr></thead>
+        <tbody>
+        {{range .DMLog}}
+          <tr>
+            <td class="mono">{{.Time}}</td>
+            <td><span class="badge {{if eq .Dir "in"}}pending{{else}}approved{{end}}">{{.Dir}}</span></td>
+            <td class="mono">{{.Peer}}</td>
+            <td>{{if .PeerName}}{{.PeerName}}{{else}}—{{end}}</td>
+            <td class="mono" style="color: var(--muted);">{{.Note}}</td>
+            <td>{{.Preview}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+      <p style="margin-top: 10px; color: var(--muted); font-size: 12px;">Ring buffer of up to 100 entries, cleared on restart. Card numbers/CVC masked. Reload to refresh.</p>
+      {{else}}
+        <p class="empty">No DMs recorded yet. Send one to <span class="mono">{{if .Npub}}{{.Npub}}{{else}}the daemon's npub{{end}}</span> to see it here.</p>
+      {{end}}
     </section>
 
     <section>

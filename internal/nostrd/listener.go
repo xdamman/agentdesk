@@ -11,6 +11,8 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip04"
+
+	"github.com/xdamman/agentdesk/internal/dmlog"
 )
 
 // DefaultRelays mirrors the nostr-cli defaults. Override via
@@ -178,6 +180,10 @@ func (l *Listener) handle(ctx context.Context, relay *nostr.Relay, ev *nostr.Eve
 
 	name := fetchProfileName(ctx, l.Relays, ev.PubKey)
 	l.logf("nostr: DM from %s (%s): action=%q", name, shortPub(ev.PubKey), req.Action)
+	dmlog.Record(dmlog.Entry{
+		Dir: dmlog.DirIn, Peer: ev.PubKey, PeerName: name,
+		Preview: plaintext,
+	})
 
 	reply := l.Handler(ctx, ev.PubKey, name, req)
 	if reply == "" {
@@ -185,9 +191,18 @@ func (l *Listener) handle(ctx context.Context, relay *nostr.Relay, ev *nostr.Eve
 	}
 	if err := l.sendReply(ctx, ev.PubKey, reply); err != nil {
 		l.logf("nostr: reply to %s failed: %v", shortPub(ev.PubKey), err)
+		dmlog.Record(dmlog.Entry{
+			Dir: dmlog.DirOut, Peer: ev.PubKey, PeerName: name,
+			Note:    "send failed: " + err.Error(),
+			Preview: reply,
+		})
 		return
 	}
 	l.logf("nostr: replied (%d bytes)", len(reply))
+	dmlog.Record(dmlog.Entry{
+		Dir: dmlog.DirOut, Peer: ev.PubKey, PeerName: name,
+		Preview: reply,
+	})
 }
 
 func (l *Listener) sendReply(ctx context.Context, toPub string, body string) error {
@@ -262,6 +277,12 @@ func publishToAny(ctx context.Context, relays []string, ev nostr.Event) error {
 		return errors.New("no relays accepted")
 	}
 	return nil
+}
+
+// LookupProfileName is the exported version of fetchProfileName for callers
+// outside this package (e.g. the homepage renderer).
+func LookupProfileName(ctx context.Context, relays []string, pub string) string {
+	return fetchProfileName(ctx, relays, pub)
 }
 
 // fetchProfileName issues a one-shot kind=0 fetch across the relays and

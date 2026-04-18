@@ -170,6 +170,7 @@ Two ways to point Stripe at this daemon:
 			logf("  secret key stored at ~/.agentdesk/nsec (0600)")
 			if cfg.AdminNostrPubkey != "" {
 				logf("admin approver: %s", adminDisplay(cfg))
+				RefreshAdminProfile(cfg.AdminNostrPubkey)
 			} else {
 				logf("admin approver: not set — run `agentdesk setup --admin <npub|nip05>` to enable approvals")
 			}
@@ -517,12 +518,19 @@ func (h *webhookHandler) handleRequest(w http.ResponseWriter, event stripe.Event
 	rule := rs.Match(cardID, merchant, amount, date)
 	if rule == nil {
 		logf("  → no matching rule; letting Stripe spending_controls decide")
-		if cfg, _ := config.LoadOrEmpty(); cfg.AdminNostrPubkey != "" {
+		cfg, _ := config.LoadOrEmpty()
+		switch {
+		case cfg.AdminNostrPubkey == "":
+			logf("  → admin not configured, skipping DM (run `agentdesk setup --admin <npub|nip05>`)")
+		case daemonIdentity == nil:
+			logf("  → nostr listener disabled (--no-nostr), cannot DM admin")
+		default:
 			askAdminAboutAuth(cfg, auth.ID, agentName, merchant, amount)
 		}
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	logf("  → matched rule %s", rule.ID)
 
 	approved, err := stripeapi.ApproveAuthorization(auth.ID)
 	if err != nil {

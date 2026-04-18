@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -11,10 +12,62 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip19"
 
 	"github.com/xdamman/agentdesk/internal/config"
+	"github.com/xdamman/agentdesk/internal/dmlog"
 	"github.com/xdamman/agentdesk/internal/nostrd"
 	"github.com/xdamman/agentdesk/internal/store"
 	"github.com/xdamman/agentdesk/internal/stripeapi"
 )
+
+// Admin profile cache — we resolve the admin's kind-0 profile once and reuse
+// the result on the homepage (a fresh relay fetch per page load would be
+// slow). AdminProfileRefresh can be invoked after setup changes.
+var (
+	adminProfileMu   sync.Mutex
+	adminProfileName string
+	adminProfilePub  string
+)
+
+// AdminProfile returns the cached display name for the admin's pubkey, or
+// empty if no name has been resolved yet. The display name typically comes
+// from a kind-0 profile event on the relays.
+func AdminProfile() string {
+	adminProfileMu.Lock()
+	defer adminProfileMu.Unlock()
+	return adminProfileName
+}
+
+// RefreshAdminProfile fetches the admin's Nostr kind-0 profile across the
+// configured relays in the background. Safe to call repeatedly; the result is
+// cached until the admin pubkey changes.
+func RefreshAdminProfile(pub string) {
+	if pub == "" {
+		adminProfileMu.Lock()
+		adminProfileName, adminProfilePub = "", ""
+		adminProfileMu.Unlock()
+		return
+	}
+	adminProfileMu.Lock()
+	if adminProfilePub == pub && adminProfileName != "" {
+		adminProfileMu.Unlock()
+		return
+	}
+	adminProfilePub = pub
+	adminProfileMu.Unlock()
+	go func() {
+		relays := daemonNostrRelays
+		if len(relays) == 0 {
+			relays = nostrd.DefaultRelays
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		name := nostrd.LookupProfileName(ctx, relays, pub)
+		adminProfileMu.Lock()
+		if adminProfilePub == pub {
+			adminProfileName = name
+		}
+		adminProfileMu.Unlock()
+	}()
+}
 
 // dispatchNostrDM is the top-level Listener handler. It routes messages from
 // the admin (approve/decline replies) separately from card requests from
@@ -192,10 +245,34 @@ func askAdminAboutAuth(cfg *config.Config, authID, agentName, merchant string, a
 		defer cancel()
 		if err := sendAdminDM(sendCtx, cfg.AdminNostrPubkey, body, relays); err != nil {
 			logf("admin: DM to %s failed: %v", adminDisplay(cfg), err)
+			dmlog.Record(dmlog.Entry{
+				Dir: dmlog.DirOut, Peer: cfg.AdminNostrPubkey,
+				PeerName: adminDisplayShort(cfg),
+				Note:     "admin ask (send failed): " + err.Error(),
+				Preview:  body,
+			})
 			return
 		}
 		logf("admin: DM'd %s about %s", adminDisplay(cfg), authID)
+		dmlog.Record(dmlog.Entry{
+			Dir: dmlog.DirOut, Peer: cfg.AdminNostrPubkey,
+			PeerName: adminDisplayShort(cfg),
+			Note:     "admin ask for " + authID,
+			Preview:  body,
+		})
 	}()
+}
+
+// adminDisplayShort returns a short label for the admin suitable for the DM
+// log column (NIP-05 if set, otherwise first 8 chars of npub).
+func adminDisplayShort(c *config.Config) string {
+	if c.AdminNIP05 != "" {
+		return c.AdminNIP05
+	}
+	if np, err := nip19.EncodePublicKey(c.AdminNostrPubkey); err == nil && len(np) > 12 {
+		return np[:12] + "…"
+	}
+	return ""
 }
 
 func sendAdminDM(ctx context.Context, toPub, text string, relays []string) error {
