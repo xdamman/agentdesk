@@ -40,7 +40,9 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 	if daemonIdentity != nil {
 		data.Npub = daemonIdentity.Npub
 		if png, err := qrcode.Encode(daemonIdentity.Npub, qrcode.Medium, 280); err == nil {
-			data.QRDataURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
+			// template.URL marks this as a trusted URL so html/template doesn't
+			// rewrite the data: scheme to #ZgotmplZ.
+			data.QRDataURL = template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(png))
 		}
 	}
 
@@ -106,7 +108,7 @@ func shortenPub(p string) string {
 
 type homeData struct {
 	Npub      string
-	QRDataURL string
+	QRDataURL template.URL
 	Agents    []agentRow
 	Requests  []requestRow
 	Now       string
