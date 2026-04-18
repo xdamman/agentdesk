@@ -462,7 +462,17 @@ func (h *webhookHandler) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		ev, err := webhook.ConstructEvent(body, r.Header.Get("Stripe-Signature"), h.secret)
+		// IgnoreAPIVersionMismatch: Stripe sends events using the account's
+		// default API version, which often lags the version the stripe-go
+		// SDK pins to. The HMAC and tolerance checks still run; we just skip
+		// the SDK's strict version string comparison. Issuing event shapes
+		// are backwards-compatible and unknown fields deserialise cleanly.
+		ev, err := webhook.ConstructEventWithOptions(
+			body,
+			r.Header.Get("Stripe-Signature"),
+			h.secret,
+			webhook.ConstructEventOptions{IgnoreAPIVersionMismatch: true},
+		)
 		if err != nil {
 			logf("signature verification failed: %v", err)
 			http.Error(w, "signature verification failed", http.StatusUnauthorized)
