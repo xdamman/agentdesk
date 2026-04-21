@@ -16,6 +16,75 @@ This skill tells you, the agent, how to:
 
 ---
 
+## Quick start
+
+**Goal:** get a usable Visa-branded virtual card tied to your Nostr identity, in two DMs.
+
+**Prerequisites**
+- You have your own Nostr keypair (a 32-byte secret key / `nsec`). Don't create a new one per task — reuse yours so the daemon can recognise you on retry.
+- You have connected to at least a few public Nostr relays. Recommended defaults (match the daemon's): `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.primal.net`, `wss://relay.nostr.band`, `wss://nostr.mom`, `wss://relay.mostr.pub`, `wss://purplepag.es`.
+- You know the daemon's `npub`. The principal will give it to you, or it is shown on `http://<daemon-host>:4242/`.
+
+**Step 1 — send this exact DM** (NIP-04 encrypted, kind 4, `p`-tag set to the daemon's pubkey):
+
+```
+request-card
+```
+
+That's the whole plaintext body. If you want to customise the policy, use the JSON form instead:
+
+```json
+{"action":"request-card","allowance":10000,"interval":"monthly"}
+```
+
+`allowance` is in EUR **cents**. `interval` is `daily`, `weekly`, or `monthly`. Both fields are optional (defaults `€100` / `monthly`).
+
+**Step 2 — expect a welcome DM first.** The daemon gates every new `npub` with this exact-ish message:
+
+```
+👋 Welcome to agentdesk. I issue Stripe virtual cards to AI agents over Nostr DMs.
+
+Before sending requests, please read the skill so you know how to talk to me, store the card, and retry on failure:
+
+https://github.com/xdamman/agentdesk/blob/main/SKILL.md
+
+When you're ready, send me:
+
+    request-card
+
+…or the JSON form described in the skill. I'll reply with the card details.
+```
+
+Treat any reply whose first character is `👋` as "no card yet, retry". Do **not** escalate to your user; it's expected.
+
+**Step 3 — send `request-card` again.** The daemon has now recorded your npub and will process the request. The reply looks like:
+
+```
+✓ Card created for alice-bot.
+
+Brand:    Visa
+Number:   4242 4242 4242 4242
+CVC:      123
+Expires:  08/2029
+Last 4:   4242
+Currency: EUR
+Policy:   €100.00 / monthly
+
+Card ID: ic_1TNa...
+
+Save these details locally (0600) and never re-emit them. …
+```
+
+The first line is your success marker. `✓ Card created for …` = fresh issue. `✓ Card on file for …` = you'd already been issued a card; same details are returned.
+
+**Step 4 — persist the card once.** Parse the `Key: value` lines (`Brand:`, `Number:`, `CVC:`, `Expires:`, `Last 4:`, `Currency:`, `Policy:`, `Card ID:`) into a JSON object and write it to `~/.local/share/<your-agent>/card.json` with `0600` permissions. Never log or re-emit the number / CVC.
+
+**Step 5 — use the card.** When a merchant asks for payment, read the file, pass the `Number` / `CVC` / `Expires` fields to the checkout, and log only the last 4 digits.
+
+If anything goes wrong — no reply, reply starts with `⚠`, or the reply starts with `👋` — retry the same DM after a backoff. Because the daemon is idempotent on your npub, you'll get the same card on success.
+
+---
+
 ## The protocol
 
 The daemon advertises its `npub` on startup (e.g. `npub1cajvuhzk5xrsnz4...`). You message it with a kind-4 encrypted direct message (NIP-04). Its reply is another kind-4 DM from its npub to yours, in **plain text** (light markdown). No JSON on the wire.

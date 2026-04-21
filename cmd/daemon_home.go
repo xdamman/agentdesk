@@ -288,17 +288,51 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!DOCTYPE html>
     {{end}}
 
     <section>
-      <h2>Daemon identity</h2>
+      <h2>For AI agents — how to request a card</h2>
       {{if .Npub}}
       <div class="npub-row">
         {{if .QRDataURL}}<div class="qr"><img src="{{.QRDataURL}}" alt="QR code for npub"></div>{{end}}
         <div>
-          <p>Agents message this daemon on Nostr (NIP-04 DM) to request a virtual card:</p>
+          <p style="margin: 0 0 6px;">Send a <strong>NIP-04 encrypted direct message</strong> (kind 4) to this npub:</p>
           <code>{{.Npub}}</code>
         </div>
       </div>
+
+      <ol style="margin: 18px 0 0 18px; padding: 0; color: var(--fg); line-height: 1.7;">
+        <li>
+          <strong>Your first DM</strong> — content (plain text):
+          <pre style="margin: 6px 0; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;">request-card</pre>
+          <span style="color: var(--muted); font-size: 12px;">Or the equivalent JSON: <code class="mono">{"action":"request-card","allowance":10000,"interval":"monthly"}</code> (allowance in EUR cents).</span>
+        </li>
+        <li style="margin-top: 10px;">
+          <strong>Expect a welcome reply first.</strong> Every new npub gets pointed at the skill before any card is issued:
+          <pre style="margin: 6px 0; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;">👋 Welcome to agentdesk ... Please read the skill ... When you're ready, send request-card.</pre>
+        </li>
+        <li style="margin-top: 10px;">
+          <strong>Send the same DM again.</strong> The daemon remembers your npub and this time replies with your card:
+          <pre style="margin: 6px 0; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;">✓ Card created for your-agent.
+Brand:    Visa
+Number:   4242 4242 4242 4242
+CVC:      123
+Expires:  08/2029
+Last 4:   4242
+Currency: EUR
+Policy:   €100.00 / monthly
+Card ID:  ic_...</pre>
+        </li>
+        <li style="margin-top: 10px;">
+          <strong>Save and use the card.</strong> Store these details locally with <code class="mono">0600</code> permissions. Never display or log the number/CVC. When charging a merchant, log only the last 4 digits.
+        </li>
+        <li style="margin-top: 10px;">
+          <strong>Retries are safe.</strong> Sending <code class="mono">request-card</code> again returns the <em>same</em> card (you're keyed by npub). On any reply starting with <code class="mono">⚠</code> or <code class="mono">👋</code> (or no reply within 30 s), back off 30 s – 5 min and retry.
+        </li>
+      </ol>
+
+      <p style="margin-top: 16px; color: var(--muted); font-size: 13px;">
+        Full agent specification: <a style="color: var(--accent);" href="https://github.com/xdamman/agentdesk/blob/main/SKILL.md">SKILL.md on GitHub</a>.
+      </p>
       {{else}}
-        <p class="empty">Nostr listener is disabled.</p>
+        <p class="empty">Nostr listener is disabled on this daemon. Restart without <code class="mono">--no-nostr</code> to accept card requests from agents.</p>
       {{end}}
     </section>
 
